@@ -4,9 +4,10 @@ local run = game:GetService("RunService")
 local uis = game:GetService("UserInputService")
 local cg = game:GetService("CoreGui")
 local plr = plrs.LocalPlayer
+local ContentProvider = game:GetService("ContentProvider")
 
 local confPath = "AnimCopierConfig.json"
-local conf = { ignored = {}, binds = {}, prefix = true, menuKey = "Y" }
+local conf = { ignored = {}, binds = {}, prefix = true, menuKey = "Y", autoClear = false }
 
 local function loadConf()
 	if readfile and isfile and isfile(confPath) then
@@ -22,6 +23,9 @@ local function loadConf()
 			end
 			if res.prefix ~= nil then
 				conf.prefix = res.prefix
+			end
+			if res.autoClear ~= nil then
+				conf.autoClear = res.autoClear
 			end
 			if res.menuKey then
 				conf.menuKey = res.menuKey
@@ -42,9 +46,22 @@ local function saveConf()
 			conf.binds[name] = obj.Value
 		end
 	end
+	conf.autoClear = autoClearEnabled
 	if writefile then
 		writefile(confPath, http:JSONEncode(conf))
 	end
+end
+
+local _lastCopy = {}
+local function safeCopy(key, text)
+	local now = os.clock()
+	if _lastCopy[key] and (now - _lastCopy[key]) < 0.25 then
+		return
+	end
+	_lastCopy[key] = now
+	pcall(function()
+		setclipboard(text)
+	end)
 end
 
 local NebulaIcons =
@@ -66,8 +83,8 @@ local Window = Starlight:CreateWindow({
 Starlight:SetTheme("Nebula")
 
 Window:CreateHomeTab({
-	SupportedExecutors = { "Solara", "Wave", "AWP", "Synapse Z", "Fluxus" },
-	UnsupportedExecutors = { "Delta", "Hydrogen" },
+	SupportedExecutors = { "Velocity", "Volt", "Madium", "Synapse Z", "Potassium", "Delta" },
+	UnsupportedExecutors = { "Solara", "Xeno" },
 	DiscordInvite = "xenonscripts",
 	IconStyle = 1,
 	Changelog = {
@@ -219,9 +236,100 @@ local function playRange(rs, re, speed)
 	end
 end
 
+local function probeAnimationPriority(animId)
+	local cleanId = tostring(animId):match("%d+")
+	if not cleanId then
+		return nil
+	end
+
+	local assetUri = "rbxassetid://" .. cleanId
+	local player = plrs.LocalPlayer
+	if not player then
+		return nil
+	end
+	local char = player.Character or player.CharacterAdded:Wait()
+	local humanoid = char:FindFirstChild("Humanoid") or char:WaitForChild("Humanoid", 3)
+	if not humanoid then
+		return nil
+	end
+	local animator = humanoid:FindFirstChild("Animator") or humanoid:WaitForChild("Animator", 3)
+	if not animator then
+		return nil
+	end
+
+	local animation = Instance.new("Animation")
+	animation.AnimationId = assetUri
+
+	pcall(function()
+		ContentProvider:PreloadAsync({ animation })
+	end)
+
+	local track
+	local ok, err = pcall(function()
+		track = animator:LoadAnimation(animation)
+	end)
+	if not ok or not track then
+		animation:Destroy()
+		return nil
+	end
+
+	local priority = track.Priority
+	pcall(function()
+		track:Stop(0)
+		track:Destroy()
+	end)
+	animation:Destroy()
+	return priority
+end
+
 plr.CharacterAdded:Connect(function()
 	track = nil
 end)
+
+local autoClearEnabled = conf.autoClear or false
+local autoClearRunning = false
+local autoClearThread = nil
+
+local function performAutoClear()
+	for _, btn in pairs(btns) do
+		if btn and btn.Destroy then
+			pcall(function()
+				btn:Destroy()
+			end)
+		end
+	end
+	table.clear(btns)
+	table.clear(logged)
+	curId = nil
+	Starlight:Notification({ Title = "AutoClear", Content = "Logs cleared.", Duration = 2, Icon = "trash" })
+end
+
+local function autoClearLoop()
+	if autoClearRunning then
+		return
+	end
+	autoClearRunning = true
+	autoClearThread = task.spawn(function()
+		while autoClearEnabled do
+			local delayTime = getgenv().AutoClearLogsDelay or math.huge
+			task.wait(delayTime)
+			if not autoClearEnabled then
+				break
+			end
+			performAutoClear()
+		end
+		autoClearRunning = false
+	end)
+end
+
+local function stopAutoClear()
+	autoClearEnabled = false
+	autoClearRunning = false
+end
+
+if autoClearEnabled then
+	autoClearLoop()
+end
 
 logGroup:CreateLabel({ Name = "Log Target" }, "LogTargetLbl"):AddDropdown({
 	Options = { "Self", "Everyone", "Selected" },
@@ -266,8 +374,8 @@ logGroup:CreateDivider()
 
 local function copyIdAction()
 	if curId then
-		local s = conf.prefix and ("rbxassetid://" .. curId) or curId
-		setclipboard(s)
+		local out = conf.prefix and ("rbxassetid://" .. curId) or curId
+		safeCopy("copy_id", out)
 	end
 end
 
@@ -282,7 +390,7 @@ createButtonWithBind(logGroup, "CopyName", {
 	Icon = NebulaIcons:GetIcon("type", "Lucide"),
 	Callback = function()
 		if curName then
-			setclipboard(curName)
+			safeCopy("copy_name", curName)
 		end
 	end,
 })
@@ -291,8 +399,21 @@ createButtonWithBind(logGroup, "CopyPath", {
 	Name = "Copy Path",
 	Icon = NebulaIcons:GetIcon("folder", "Lucide"),
 	Callback = function()
-		if curPath then
-			setclipboard(curPath)
+		if curId then
+			local cleanID = tostring(curId):match("%d+") or tostring(curId)
+			local foundPaths = {}
+			for _, obj in pairs(game:GetDescendants()) do
+				if obj:IsA("Animation") and obj.AnimationId and string.find(obj.AnimationId, cleanID) then
+					table.insert(foundPaths, obj:GetFullName())
+				end
+			end
+			if #foundPaths > 0 then
+				safeCopy("copy_path", table.concat(foundPaths, "\n"))
+			elseif curPath then
+				safeCopy("copy_path", curPath)
+			end
+		elseif curPath then
+			safeCopy("copy_path", curPath)
 		end
 	end,
 })
@@ -364,14 +485,7 @@ local function logAnim(animTrack, animator)
 				Content = string.format("ID: rbxassetid://%s\nPath: %s", id, aPath),
 				Type = 1,
 				Actions = {
-					Primary = {
-						Name = "Load and Play",
-						Icon = NebulaIcons:GetIcon("play", "Lucide"),
-						Callback = function()
-							playId = id
-							playRange(0, nil, spd)
-						end,
-					},
+
 					{
 						Name = "Load into Player",
 						Icon = NebulaIcons:GetIcon("play-circle", "Lucide"),
@@ -393,25 +507,67 @@ local function logAnim(animTrack, animator)
 							playId = id
 						end,
 					},
+
 					{
 						Name = "Copy ID",
 						Icon = NebulaIcons:GetIcon("clipboard", "Lucide"),
 						Callback = function()
-							setclipboard(conf.prefix and ("rbxassetid://" .. id) or id)
+							local out = conf.prefix and ("rbxassetid://" .. id) or id
+							safeCopy("prompt_copy_id", out)
 						end,
 					},
 					{
 						Name = "Copy Name",
 						Icon = NebulaIcons:GetIcon("type", "Lucide"),
 						Callback = function()
-							setclipboard(aName)
+							safeCopy("prompt_copy_name", aName)
 						end,
 					},
 					{
 						Name = "Copy Path",
 						Icon = NebulaIcons:GetIcon("folder", "Lucide"),
 						Callback = function()
-							setclipboard(aPath)
+							local cleanID = tostring(id):match("%d+") or tostring(id)
+							local foundPaths = {}
+							for _, obj in pairs(game:GetDescendants()) do
+								if
+									obj:IsA("Animation")
+									and obj.AnimationId
+									and string.find(obj.AnimationId, cleanID)
+								then
+									table.insert(foundPaths, obj:GetFullName())
+								end
+							end
+							if #foundPaths > 0 then
+								safeCopy("prompt_copy_path", table.concat(foundPaths, "\n"))
+							else
+								safeCopy("prompt_copy_path", aPath)
+							end
+						end,
+					},
+	
+					{
+						Name = "Copy Info",
+						Icon = NebulaIcons:GetIcon("info", "Lucide"),
+						Callback = function()
+							local cleanID = tostring(id):match("%d+") or tostring(id)
+							local pr = probeAnimationPriority(cleanID)
+							local prStr = pr and tostring(pr) or "Unknown"
+							local displayID = conf.prefix and ("rbxassetid://" .. cleanID) or cleanID
+							local info = string.format(
+								"ID: %s\nName: %s\nPath: %s\nPriority: %s",
+								displayID,
+								aName,
+								aPath,
+								prStr
+							)
+							safeCopy("prompt_copy_info", info)
+							Starlight:Notification({
+								Title = "Copied",
+								Content = "Animation info copied!",
+								Duration = 2,
+								Icon = "check",
+							})
 						end,
 					},
 					{
@@ -500,7 +656,7 @@ createButtonWithBind(playGroup, "CopyLen", {
 		end
 		task.delay(0.1, function()
 			local l = string.format("%.6f", track.Length)
-			setclipboard(l)
+			safeCopy("copy_len", l)
 		end)
 	end,
 })
@@ -757,7 +913,7 @@ createButtonWithBind(varGroup, "CopyAnalysis", {
 		for i, v in ipairs(variants) do
 			out = out .. string.format("Variant %d:  %.5f s  ->  %.5f s\n", i, v.s, v.e)
 		end
-		setclipboard(out)
+		safeCopy("copy_analysis", out)
 	end,
 })
 
@@ -852,9 +1008,15 @@ createButtonWithBind(tlGroup, "OpenVisualTimeline", {
 	Icon = NebulaIcons:GetIcon("bar-chart-2", "Lucide"),
 	Callback = function()
 		if not tlViewerInstance then
-			tlViewerInstance = loadstring(
-				game:HttpGet("https://raw.githubusercontent.com/xKaizoMain/Utility/refs/heads/main/Timeline.lua")
-			)()
+			local src = nil
+			if isfile and isfile("Helper (Xenon)/TimelineViewer.lua") then
+				src = readfile("Helper (Xenon)/TimelineViewer.lua")
+			elseif isfile and isfile("TimelineViewer.lua") then
+				src = readfile("TimelineViewer.lua")
+			else
+				src = game:HttpGet("https://raw.githubusercontent.com/xKaizoMain/Utility/refs/heads/main/Timeline.lua")
+			end
+			tlViewerInstance = loadstring(src)()
 		end
 		tlViewerInstance.toggle({
 			getTrack = function()
@@ -950,6 +1112,21 @@ setGroup:CreateToggle({
 		conf.prefix = v
 	end,
 }, "IncludeAssetPrefixToggle")
+
+setGroup:CreateToggle({
+	Name = "Enable Auto Clear",
+	CurrentValue = conf.autoClear,
+	Callback = function(v)
+		conf.autoClear = v
+		autoClearEnabled = v
+		if v then
+			autoClearLoop()
+		else
+			stopAutoClear()
+		end
+		pcall(saveConf)
+	end,
+}, "EnableAutoClearToggle")
 
 setGroup:CreateInput({
 	Name = "Variant Gap Threshold",
